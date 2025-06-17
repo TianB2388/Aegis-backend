@@ -1,0 +1,220 @@
+// backend/index.js
+
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const nodemailer = require("nodemailer");
+const twilio = require("twilio");
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+let transactions = [];
+let fraudReports = [];
+
+// Suspicious IPs/devices for example
+const suspiciousIPs = ["41.162.22.11"];
+const suspiciousDevices = ["SM-A125F/2025"];
+
+// Email config - replace with your SMTP credentials in .env
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// Twilio config - replace with your Twilio credentials in .env
+const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+const twilioFromNumber = process.env.TWILIO_FROM_NUMBER;
+const adminPhoneNumber = process.env.ADMIN_PHONE_NUMBER;
+const adminEmail = process.env.ADMIN_EMAIL;
+
+function sendEmailNotification(subject, text) {
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: adminEmail,
+    subject,
+    text,
+  };
+  transporter.sendMail(mailOptions, (err, info) => {
+    if (err) {
+      console.error("Error sending email:", err);
+    } else {
+      console.log("Email sent:", info.response);
+    }
+  });
+}
+
+function sendSmsNotification(message) {
+  twilioClient.messages
+    .create({
+      body: message,
+      from: twilioFromNumber,
+      to: adminPhoneNumber,
+    })
+    .then((message) => console.log("SMS sent, SID:", message.sid))
+    .catch((err) => console.error("Error sending SMS:", err));
+}
+
+function isFraudulent(transaction) {
+  const payerTxs = transactions.filter(
+    (tx) => tx.payerEmail === transaction.payerEmail
+  );
+
+  const recentFraudClaims = payerTxs.filter(
+    (tx) =>
+      tx.status === "fraud" &&
+      new Date(tx.timestamp) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  );
+
+  if (recentFraudClaims.length >= 3) {
+    return {
+      detected: true,
+      reason: "Multiple recent fraud claims from this payer",
+    };
+  }
+
+  const avgAmount =
+    payerTxs.reduce((acc, tx) => acc + tx.amount, 0) / (payerTxs.length || 1);
+  if (transaction.amount > avgAmount * 3) {
+    return {
+      detected: true,
+      reason: "Transaction amount significantly higher than usual",
+    };
+  }
+
+  if (
+    suspiciousIPs.includes(transaction.ip) ||
+    suspiciousDevices.includes(transaction.deviceId)
+  ) {
+    return {
+      detected: true,
+      reason: "Transaction uses suspicious IP or device",
+    };
+  }
+
+  if (
+    transaction.senderIp &&
+    transaction.receiverIp &&
+    transaction.senderIp === transaction.receiverIp
+  ) {
+    return {
+      detected: true,
+      reason: "Sender and receiver share the same IP address",
+    };
+  }
+
+  if (
+    transaction.senderDeviceId &&
+    transaction.receiverDeviceId &&
+    transaction.senderDeviceId === transaction.receiverDeviceId
+  ) {
+    return {
+      detected: true,
+      reason: "Sender and receiver use the same device",
+    };
+  }
+
+  return { detected: false };
+}
+
+// Endpoint client calls to submit payment transaction
+app.post("/transactions", (req, res) => {
+  const {
+    transactionId,
+    amount,
+    payerEmail,
+    recipientBank,
+    insured,
+    insuranceFee,
+    platformShare,
+    companyShare,
+    ip,
+    deviceId,
+    senderIp,
+    receiverIp,
+    senderDeviceId,
+    receiverDeviceId,
+  } = req.body;
+
+  if (
+    !transactionId ||
+    !amount ||
+    !payerEmail ||
+    !recipientBank ||
+    typeof insured !== "boolean"
+  ) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  const transaction = {
+    transactionId,
+    amount,
+    payerEmail,
+    recipientBank,
+    insured,
+    insuranceFee,
+    platformShare,
+    companyShare,
+    ip,
+    deviceId,
+    senderIp,
+    receiverIp,
+    senderDeviceId,
+    receiverDeviceId,
+    timestamp: new Date().toISOString(),
+  };
+
+  const fraudCheck = isFraudulent(transaction);
+
+  if (fraudCheck.detected) {
+    transaction.status = "fraud";
+
+    const fraudReport = {
+      transactionId,
+      fraudType: "Automatic Fraud Detection",
+      details: fraudCheck.reason,
+      reportedAt: new Date().toISOString(),
+      payerEmail,
+      ip,
+      deviceId,
+    };
+    fraudReports.push(fraudReport);
+
+    // Send email and SMS notifications to admin
+    const message = `🚨 Fraud detected for transaction ${transactionId}.\nReason: ${fraudCheck.reason}\nPayer: ${payerEmail}\nAmount: R${amount}`;
+    sendEmailNotification("Fraud Alert - SafePay", message);
+    sendSmsNotification(message);
+
+    console.log(`⚠️ Fraud detected: ${fraudCheck.reason}`);
+  } else {
+    transaction.status = "completed";
+  }
+
+  transactions.push(transaction);
+
+  return res.json({
+    message: fraudCheck.detected
+      ? "Transaction flagged as fraud"
+      : "Transaction processed successfully",
+    transaction,
+  });
+});
+
+// Admin endpoints
+app.get("/transactions", (req, res) => {
+  res.json(transactions);
+});
+
+app.get("/fraud-reports", (req, res) => {
+  res.json(fraudReports);
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`SafePay backend running on port ${PORT}`);
+});
