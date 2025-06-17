@@ -1,221 +1,60 @@
-// backend/index.js
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from datetime import datetime
+import uuid
 
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const nodemailer = require("nodemailer");
-const twilio = require("twilio");
+app = Flask(__name__)
+CORS(app)
 
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+# Simulated database
+transactions = []
+fraud_reports = []
 
-let transactions = [];
-let fraudReports = [];
+@app.route("/api/insure", methods=["POST"])
+def insure():
+    data = request.get_json()
 
-// Suspicious IPs/devices for example
-const suspiciousIPs = ["41.162.22.11"];
-const suspiciousDevices = ["SM-A125F/2025"];
-
-// Email config - replace with your SMTP credentials in .env
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
-
-// Twilio config - replace with your Twilio credentials in .env
-const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
-const twilioFromNumber = process.env.TWILIO_FROM_NUMBER;
-const adminPhoneNumber = process.env.ADMIN_PHONE_NUMBER;
-const adminEmail = process.env.ADMIN_EMAIL;
-
-function sendEmailNotification(subject, text) {
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: adminEmail,
-    subject,
-    text,
-  };
-  transporter.sendMail(mailOptions, (err, info) => {
-    if (err) {
-      console.error("Error sending email:", err);
-    } else {
-      console.log("Email sent:", info.response);
+    transaction = {
+        "transaction_id": data.get("transaction_id"),
+        "amount": data.get("amount"),
+        "insured": data.get("insured"),
+        "insurance_fee": data.get("insurance_fee"),
+        "timestamp": datetime.now().isoformat(),
+        "ip": request.remote_addr,
+        "device_id": request.headers.get("X-Device-ID", "unknown-device"),
     }
-  });
-}
 
-function sendSmsNotification(message) {
-  twilioClient.messages
-    .create({
-      body: message,
-      from: twilioFromNumber,
-      to: adminPhoneNumber,
-    })
-    .then((message) => console.log("SMS sent, SID:", message.sid))
-    .catch((err) => console.error("Error sending SMS:", err));
-}
+    # Fraud pattern detection
+    fraud = detect_fraud(transaction)
+    transaction["fraud"] = fraud
 
-function isFraudulent(transaction) {
-  const payerTxs = transactions.filter(
-    (tx) => tx.payerEmail === transaction.payerEmail
-  );
+    if fraud:
+        fraud_report = {
+            "id": str(uuid.uuid4()),
+            "transaction_id": transaction["transaction_id"],
+            "reason": "Suspicious transaction patterns",
+            "ip": transaction["ip"],
+            "device_id": transaction["device_id"],
+            "timestamp": transaction["timestamp"]
+        }
+        fraud_reports.append(fraud_report)
+        notify_admin(fraud_report)
 
-  const recentFraudClaims = payerTxs.filter(
-    (tx) =>
-      tx.status === "fraud" &&
-      new Date(tx.timestamp) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-  );
+    transactions.append(transaction)
+    return jsonify({"status": "success", "fraud_detected": fraud})
 
-  if (recentFraudClaims.length >= 3) {
-    return {
-      detected: true,
-      reason: "Multiple recent fraud claims from this payer",
-    };
-  }
+def detect_fraud(txn):
+    risky_amount = float(txn["amount"]) > 10000
+    repeated_device = any(t["device_id"] == txn["device_id"] for t in transactions[-5:])
+    same_ip_claims = sum(1 for t in transactions if t["ip"] == txn["ip"]) > 3
 
-  const avgAmount =
-    payerTxs.reduce((acc, tx) => acc + tx.amount, 0) / (payerTxs.length || 1);
-  if (transaction.amount > avgAmount * 3) {
-    return {
-      detected: true,
-      reason: "Transaction amount significantly higher than usual",
-    };
-  }
+    return risky_amount or repeated_device or same_ip_claims
 
-  if (
-    suspiciousIPs.includes(transaction.ip) ||
-    suspiciousDevices.includes(transaction.deviceId)
-  ) {
-    return {
-      detected: true,
-      reason: "Transaction uses suspicious IP or device",
-    };
-  }
+def notify_admin(report):
+    print("Fraud alert: ", report)
+    # Add SMS/email integration here
 
-  if (
-    transaction.senderIp &&
-    transaction.receiverIp &&
-    transaction.senderIp === transaction.receiverIp
-  ) {
-    return {
-      detected: true,
-      reason: "Sender and receiver share the same IP address",
-    };
-  }
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
 
-  if (
-    transaction.senderDeviceId &&
-    transaction.receiverDeviceId &&
-    transaction.senderDeviceId === transaction.receiverDeviceId
-  ) {
-    return {
-      detected: true,
-      reason: "Sender and receiver use the same device",
-    };
-  }
-
-  return { detected: false };
-}
-
-// Endpoint client calls to submit payment transaction
-app.post("/transactions", (req, res) => {
-  const {
-    transactionId,
-    amount,
-    payerEmail,
-    recipientBank,
-    insured,
-    insuranceFee,
-    platformShare,
-    companyShare,
-    ip,
-    deviceId,
-    senderIp,
-    receiverIp,
-    senderDeviceId,
-    receiverDeviceId,
-  } = req.body;
-
-  if (
-    !transactionId ||
-    !amount ||
-    !payerEmail ||
-    !recipientBank ||
-    typeof insured !== "boolean"
-  ) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
-  const transaction = {
-    transactionId,
-    amount,
-    payerEmail,
-    recipientBank,
-    insured,
-    insuranceFee,
-    platformShare,
-    companyShare,
-    ip,
-    deviceId,
-    senderIp,
-    receiverIp,
-    senderDeviceId,
-    receiverDeviceId,
-    timestamp: new Date().toISOString(),
-  };
-
-  const fraudCheck = isFraudulent(transaction);
-
-  if (fraudCheck.detected) {
-    transaction.status = "fraud";
-
-    const fraudReport = {
-      transactionId,
-      fraudType: "Automatic Fraud Detection",
-      details: fraudCheck.reason,
-      reportedAt: new Date().toISOString(),
-      payerEmail,
-      ip,
-      deviceId,
-    };
-    fraudReports.push(fraudReport);
-
-    // Send email and SMS notifications to admin
-    const message = `🚨 Fraud detected for transaction ${transactionId}.\nReason: ${fraudCheck.reason}\nPayer: ${payerEmail}\nAmount: R${amount}`;
-    sendEmailNotification("Fraud Alert - SafePay", message);
-    sendSmsNotification(message);
-
-    console.log(`⚠️ Fraud detected: ${fraudCheck.reason}`);
-  } else {
-    transaction.status = "completed";
-  }
-
-  transactions.push(transaction);
-
-  return res.json({
-    message: fraudCheck.detected
-      ? "Transaction flagged as fraud"
-      : "Transaction processed successfully",
-    transaction,
-  });
-});
-
-// Admin endpoints
-app.get("/transactions", (req, res) => {
-  res.json(transactions);
-});
-
-app.get("/fraud-reports", (req, res) => {
-  res.json(fraudReports);
-});
-
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`SafePay backend running on port ${PORT}`);
-});
 
