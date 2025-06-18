@@ -4,6 +4,9 @@ import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import nodemailer from 'nodemailer';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -11,20 +14,22 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(bodyParser.json());
 
-// Mock database
-const transactions: any[] = [];
-const fraudAlerts: any[] = [];
+// In-memory "database"
+const transactions = [];
+const fraudAlerts = [];
 
-// Utility - fraud detection logic
-function detectFraud(transaction: any) {
-  const alerts: string[] = [];
+// --- Utility: Simple fraud detection logic ---
+function detectFraud(transaction, recentDeviceIds) {
+  const alerts = [];
 
   if (transaction.sender_ip === transaction.recipient_ip) {
     alerts.push("Sender and recipient share the same IP address.");
   }
-  if (transaction.device_id === transaction.previous_device_id) {
-    alerts.push("Repeated device ID for multiple high-value transactions.");
+
+  if (recentDeviceIds.includes(transaction.device_id)) {
+    alerts.push("Repeated device ID for multiple transactions.");
   }
+
   if (transaction.claims_history > 2) {
     alerts.push("User has made multiple claims recently.");
   }
@@ -32,18 +37,19 @@ function detectFraud(transaction: any) {
   return alerts;
 }
 
-// Email sender setup (mock credentials)
+// --- Email sender setup ---
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: 'aegis.alerts@gmail.com',
-    pass: 'yourpasswordhere',
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
 });
 
-function sendFraudAlertEmail(alertDetails: any) {
+// --- Utility: Send fraud alert email ---
+function sendFraudAlertEmail(alertDetails) {
   const message = {
-    from: 'Aegis Fraud Alerts <aegis.alerts@gmail.com>',
+    from: `Aegis Fraud Alerts <${process.env.EMAIL_USER}>`,
     to: 'admin@aegis-protection.com',
     subject: '⚠️ Fraud Detected in Transaction',
     text: JSON.stringify(alertDetails, null, 2),
@@ -58,12 +64,23 @@ function sendFraudAlertEmail(alertDetails: any) {
   });
 }
 
-// Create transaction endpoint
+// --- Endpoint: Create transaction ---
 app.post('/api/aegis/protect', (req, res) => {
   const transaction = req.body;
 
-  // Fraud check
-  const fraudFlags = detectFraud(transaction);
+  // Validate required fields
+  const requiredFields = ['sender_ip', 'recipient_ip', 'device_id', 'claims_history'];
+  for (let field of requiredFields) {
+    if (!transaction[field]) {
+      return res.status(400).json({ error: `Missing required field: ${field}` });
+    }
+  }
+
+  // Get recent device IDs for comparison
+  const recentDeviceIds = transactions.map(t => t.device_id);
+
+  // Detect fraud
+  const fraudFlags = detectFraud(transaction, recentDeviceIds);
 
   if (fraudFlags.length > 0) {
     transaction.status = 'flagged';
@@ -78,23 +95,23 @@ app.post('/api/aegis/protect', (req, res) => {
   res.status(201).json({ success: true, status: transaction.status, fraudFlags });
 });
 
-// Admin view: Get all transactions
+// --- Admin Endpoints ---
 app.get('/api/aegis/admin/transactions', (req, res) => {
   res.json(transactions);
 });
 
-// Admin view: Get fraud alerts
 app.get('/api/aegis/admin/fraud-alerts', (req, res) => {
   res.json(fraudAlerts);
 });
 
-// Health check
+// --- Health Check ---
 app.get('/', (req, res) => {
   res.send("Aegis API running");
 });
 
+// --- Start Server ---
 app.listen(PORT, () => {
-  console.log(`Aegis API running on port ${PORT}`);
+  console.log(`✅ Aegis API running on port ${PORT}`);
 });
 
 
