@@ -1,117 +1,117 @@
-// --- Backend (Aegis Backend - Express API) ---
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { useState } from "react";
 
-import express from 'express';
-import cors from 'cors';
-import bodyParser from 'body-parser';
-import nodemailer from 'nodemailer';
-import dotenv from 'dotenv';
+export default function AegisClientPortal() {
+  const [insuranceEnabled, setInsuranceEnabled] = useState(true);
+  const [paymentAmount, setPaymentAmount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
 
-dotenv.config();
+  const insuranceFee = paymentAmount * 0.02;
 
-const app = express();
-const PORT = process.env.PORT || 5000;
-
-app.use(cors());
-app.use(bodyParser.json());
-
-// In-memory "database"
-const transactions = [];
-const fraudAlerts = [];
-
-// --- Utility: Simple fraud detection logic ---
-function detectFraud(transaction, recentDeviceIds) {
-  const alerts = [];
-
-  if (transaction.sender_ip === transaction.recipient_ip) {
-    alerts.push("Sender and recipient share the same IP address.");
-  }
-
-  if (recentDeviceIds.includes(transaction.device_id)) {
-    alerts.push("Repeated device ID for multiple transactions.");
-  }
-
-  if (transaction.claims_history > 2) {
-    alerts.push("User has made multiple claims recently.");
-  }
-
-  return alerts;
-}
-
-// --- Email sender setup ---
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
-
-// --- Utility: Send fraud alert email ---
-function sendFraudAlertEmail(alertDetails) {
-  const message = {
-    from: `Aegis Fraud Alerts <${process.env.EMAIL_USER}>`,
-    to: 'admin@aegis-protection.com',
-    subject: '⚠️ Fraud Detected in Transaction',
-    text: JSON.stringify(alertDetails, null, 2),
+  const handleToggleInsurance = (enabled: boolean) => {
+    setInsuranceEnabled(enabled);
   };
 
-  transporter.sendMail(message, (err, info) => {
-    if (err) {
-      console.error("Failed to send fraud alert email:", err);
-    } else {
-      console.log("Fraud alert email sent:", info.response);
+  const handlePayment = async () => {
+    if (paymentAmount <= 0) {
+      setResult("Please enter a valid payment amount.");
+      return;
     }
-  });
+
+    setLoading(true);
+    setResult(null);
+
+    // Mock transaction data (backend expects these)
+    const transaction = {
+      sender_ip: "192.168.1.2",              // Normally you’d get this server-side
+      recipient_ip: "192.168.1.3",           // Mocked here
+      device_id: "device-abc-123",           // Could be from localStorage or fingerprinting lib
+      claims_history: insuranceEnabled ? 0 : 3, // Simulate risky user if insurance is off
+      amount: paymentAmount,
+    };
+
+    try {
+      const response = await fetch("http://localhost:5000/api/aegis/protect", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(transaction),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setResult(`Transaction ${data.status.toUpperCase()}${data.fraudFlags.length > 0 ? `: ${data.fraudFlags.join(', ')}` : ''}`);
+      } else {
+        setResult("Something went wrong. Try again.");
+      }
+    } catch (err) {
+      console.error(err);
+      setResult("Server error. Please try later.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-gray-50">
+      <Card className="w-full max-w-md">
+        <CardContent className="p-6">
+          <h2 className="text-2xl font-semibold mb-4 text-center">Aegis Insurance Option</h2>
+
+          <div className="mb-4">
+            <label htmlFor="amount" className="block text-sm font-medium text-gray-700">
+              Enter Payment Amount (R)
+            </label>
+            <input
+              id="amount"
+              type="number"
+              value={paymentAmount === 0 ? "" : paymentAmount}
+              onChange={(e) => setPaymentAmount(Number(e.target.value))}
+              placeholder="e.g. 1000"
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+            />
+          </div>
+
+          <div className="flex items-center justify-between mb-2">
+            <label htmlFor="insurance" className="text-sm font-medium text-gray-800">
+              Enable Aegis Protection (2%)
+            </label>
+            <Switch
+              id="insurance"
+              checked={insuranceEnabled}
+              onCheckedChange={handleToggleInsurance}
+            />
+          </div>
+
+          {insuranceEnabled && paymentAmount > 0 && (
+            <p className="text-sm text-blue-600 mt-2">
+              Aegis will cover up to R{paymentAmount.toFixed(2)}. Premium: R{insuranceFee.toFixed(2)}
+            </p>
+          )}
+
+          {!insuranceEnabled && paymentAmount > 0 && (
+            <p className="text-sm text-gray-500 mt-2">
+              You are proceeding without Aegis protection.
+            </p>
+          )}
+
+          <Button className="w-full mt-6" onClick={handlePayment} disabled={loading}>
+            {loading ? "Processing..." : "Continue Payment"}
+          </Button>
+
+          {result && (
+            <p className="text-center text-sm mt-4 text-gray-700">{result}</p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
-// --- Endpoint: Create transaction ---
-app.post('/api/aegis/protect', (req, res) => {
-  const transaction = req.body;
-
-  // Validate required fields
-  const requiredFields = ['sender_ip', 'recipient_ip', 'device_id', 'claims_history'];
-  for (let field of requiredFields) {
-    if (!transaction[field]) {
-      return res.status(400).json({ error: `Missing required field: ${field}` });
-    }
-  }
-
-  // Get recent device IDs for comparison
-  const recentDeviceIds = transactions.map(t => t.device_id);
-
-  // Detect fraud
-  const fraudFlags = detectFraud(transaction, recentDeviceIds);
-
-  if (fraudFlags.length > 0) {
-    transaction.status = 'flagged';
-    transaction.fraudFlags = fraudFlags;
-    fraudAlerts.push(transaction);
-    sendFraudAlertEmail(transaction);
-  } else {
-    transaction.status = 'clean';
-  }
-
-  transactions.push(transaction);
-  res.status(201).json({ success: true, status: transaction.status, fraudFlags });
-});
-
-// --- Admin Endpoints ---
-app.get('/api/aegis/admin/transactions', (req, res) => {
-  res.json(transactions);
-});
-
-app.get('/api/aegis/admin/fraud-alerts', (req, res) => {
-  res.json(fraudAlerts);
-});
-
-// --- Health Check ---
-app.get('/', (req, res) => {
-  res.send("Aegis API running");
-});
-
-// --- Start Server ---
-app.listen(PORT, () => {
-  console.log(`✅ Aegis API running on port ${PORT}`);
-});
 
 
