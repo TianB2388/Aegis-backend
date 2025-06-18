@@ -1,117 +1,119 @@
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { useState } from "react";
+import express from "express";
+import cors from "cors";
+import bodyParser from "body-parser";
+import nodemailer from "nodemailer";
 
-export default function AegisClientPortal() {
-  const [insuranceEnabled, setInsuranceEnabled] = useState(true);
-  const [paymentAmount, setPaymentAmount] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<string | null>(null);
+const app = express();
+const PORT = process.env.PORT || 5000;
 
-  const insuranceFee = paymentAmount * 0.02;
+app.use(cors());
+app.use(bodyParser.json());
 
-  const handleToggleInsurance = (enabled: boolean) => {
-    setInsuranceEnabled(enabled);
+// Simulated database
+const transactions = [];
+const fraudReports = [];
+
+// Email sender (e.g., Gmail SMTP — secure this in production)
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.ADMIN_EMAIL,
+    pass: process.env.ADMIN_PASS,
+  },
+});
+
+// 🚨 Fraud Detection Utility
+function detectFraud(transaction) {
+  const { ip, deviceId, payerId } = transaction;
+
+  const recentTransactions = transactions.slice(-20);
+  const sameIP = recentTransactions.filter((t) => t.ip === ip).length;
+  const sameDevice = recentTransactions.filter((t) => t.deviceId === deviceId).length;
+  const samePayerClaims = transactions.filter((t) => t.payerId === payerId && t.claimed).length;
+
+  const fraudScore = sameIP > 3 || sameDevice > 3 || samePayerClaims > 2;
+
+  return fraudScore ? {
+    fraudType: "Suspicious Pattern Detected",
+    evidence: {
+      ip,
+      deviceId,
+      sameIP,
+      sameDevice,
+      claimCount: samePayerClaims,
+    },
+  } : null;
+}
+
+// 📩 Notify Admin
+async function sendFraudAlertEmail(report) {
+  const message = {
+    from: process.env.ADMIN_EMAIL,
+    to: process.env.BANK_EMAIL,
+    subject: "🚨 Fraud Detected on Aegis Payment",
+    text: `Fraud Detected:\n\n${JSON.stringify(report, null, 2)}`,
   };
 
-  const handlePayment = async () => {
-    if (paymentAmount <= 0) {
-      setResult("Please enter a valid payment amount.");
-      return;
-    }
+  try {
+    await transporter.sendMail(message);
+    console.log("Fraud email sent to bank.");
+  } catch (err) {
+    console.error("Failed to send fraud email:", err.message);
+  }
+}
 
-    setLoading(true);
-    setResult(null);
+// ✅ Receive and store transaction
+app.post("/api/transactions", async (req, res) => {
+  const tx = req.body;
 
-    // Mock transaction data (backend expects these)
-    const transaction = {
-      sender_ip: "192.168.1.2",              // Normally you’d get this server-side
-      recipient_ip: "192.168.1.3",           // Mocked here
-      device_id: "device-abc-123",           // Could be from localStorage or fingerprinting lib
-      claims_history: insuranceEnabled ? 0 : 3, // Simulate risky user if insurance is off
-      amount: paymentAmount,
+  const insuranceFee = tx.amount * 0.02;
+  const platformFee = insuranceFee * 0.25;
+  const sellerShare = insuranceFee * 0.75;
+
+  const transaction = {
+    ...tx,
+    insuranceFee,
+    platformFee,
+    sellerShare,
+    claimed: false,
+    timestamp: new Date().toISOString(),
+  };
+
+  transactions.push(transaction);
+
+  const fraudDetected = detectFraud(transaction);
+  if (fraudDetected) {
+    const fraudReport = {
+      ...fraudDetected,
+      ...transaction,
+      timestamp: new Date().toISOString(),
     };
 
-    try {
-      const response = await fetch("http://localhost:5000/api/aegis/protect", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(transaction),
-      });
+    fraudReports.push(fraudReport);
+    await sendFraudAlertEmail(fraudReport);
+  }
 
-      const data = await response.json();
+  res.json({ status: "success", message: "Transaction recorded", fraud: !!fraudDetected });
+});
 
-      if (data.success) {
-        setResult(`Transaction ${data.status.toUpperCase()}${data.fraudFlags.length > 0 ? `: ${data.fraudFlags.join(', ')}` : ''}`);
-      } else {
-        setResult("Something went wrong. Try again.");
-      }
-    } catch (err) {
-      console.error(err);
-      setResult("Server error. Please try later.");
-    } finally {
-      setLoading(false);
-    }
-  };
+// 🛠 Admin: Get all transactions
+app.get("/api/admin/transactions", (req, res) => {
+  res.json(transactions);
+});
 
-  return (
-    <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-gray-50">
-      <Card className="w-full max-w-md">
-        <CardContent className="p-6">
-          <h2 className="text-2xl font-semibold mb-4 text-center">Aegis Insurance Option</h2>
+// 🛠 Admin: Get fraud reports
+app.get("/api/admin/fraud-reports", (req, res) => {
+  res.json(fraudReports);
+});
 
-          <div className="mb-4">
-            <label htmlFor="amount" className="block text-sm font-medium text-gray-700">
-              Enter Payment Amount (R)
-            </label>
-            <input
-              id="amount"
-              type="number"
-              value={paymentAmount === 0 ? "" : paymentAmount}
-              onChange={(e) => setPaymentAmount(Number(e.target.value))}
-              placeholder="e.g. 1000"
-              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-            />
-          </div>
+// 📍 Root
+app.get("/", (req, res) => {
+  res.send("Aegis backend is live");
+});
 
-          <div className="flex items-center justify-between mb-2">
-            <label htmlFor="insurance" className="text-sm font-medium text-gray-800">
-              Enable Aegis Protection (2%)
-            </label>
-            <Switch
-              id="insurance"
-              checked={insuranceEnabled}
-              onCheckedChange={handleToggleInsurance}
-            />
-          </div>
-
-          {insuranceEnabled && paymentAmount > 0 && (
-            <p className="text-sm text-blue-600 mt-2">
-              Aegis will cover up to R{paymentAmount.toFixed(2)}. Premium: R{insuranceFee.toFixed(2)}
-            </p>
-          )}
-
-          {!insuranceEnabled && paymentAmount > 0 && (
-            <p className="text-sm text-gray-500 mt-2">
-              You are proceeding without Aegis protection.
-            </p>
-          )}
-
-          <Button className="w-full mt-6" onClick={handlePayment} disabled={loading}>
-            {loading ? "Processing..." : "Continue Payment"}
-          </Button>
-
-          {result && (
-            <p className="text-center text-sm mt-4 text-gray-700">{result}</p>
-          )}
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
+app.listen(PORT, () => {
+  console.log(`✅ Aegis backend running at http://localhost:${PORT}`);
+});
 
 
 
